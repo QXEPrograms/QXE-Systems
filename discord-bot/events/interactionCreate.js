@@ -35,8 +35,9 @@ module.exports = {
     const command = interaction.client.commands.get(interaction.commandName);
     if (!command) return;
 
-    // Permission check — all commands require Mod or Admin role
-    if (!hasPermission(interaction.member)) {
+    // Public commands — anyone can use these
+    const publicCommands = ['tradeview'];
+    if (!publicCommands.includes(interaction.commandName) && !hasPermission(interaction.member)) {
       return interaction.reply({ content: 'You do not have permission to use this command.', flags: 64 });
     }
 
