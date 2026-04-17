@@ -7,6 +7,7 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", 0))
+WELCOME_ROLE_ID = int(os.getenv("WELCOME_ROLE_ID", 0))
 
 intents = discord.Intents.default()
 intents.members = True
@@ -37,6 +38,10 @@ async def on_member_join(member: discord.Member):
     embed.set_footer(text=f"Joined: {member.joined_at.strftime('%B %d, %Y')}")
 
     await channel.send(embed=embed)
+
+    role = member.guild.get_role(WELCOME_ROLE_ID)
+    if role:
+        await member.add_roles(role, reason="Auto-assigned on join")
 
 
 bot.run(TOKEN)
