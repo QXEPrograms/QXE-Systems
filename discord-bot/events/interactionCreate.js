@@ -1,11 +1,14 @@
 const { EmbedBuilder } = require('discord.js');
 
 // Roles that are allowed to use bot commands
+const ALLOWED_ROLES = [
+  '1494674735299297431',
+  '1494675017563373729',
+  '1494736160612941954',
+];
+
 function hasPermission(member) {
-  return (
-    member.roles.cache.has(process.env.ADMIN_ROLE_ID) ||
-    member.roles.cache.has(process.env.MOD_ROLE_ID)
-  );
+  return ALLOWED_ROLES.some(id => member.roles.cache.has(id));
 }
 
 module.exports = {
