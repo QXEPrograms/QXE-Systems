@@ -1,34 +1,32 @@
- QXE Round System — (c) 2026 QXEPrograms                                                                                                                                                                                                  
-                                                                                                                                                                                                                                             
-  A production-ready round-based game loop system for Roblox.                                                                                                                                                                                
-                                                                                                                                                                                                                                           
-  ---                                                                                                                                                                                                                                        
-   
-  ## Features                                                                                                                                                                                                                                
-  - Automatic game loop — Waiting → Intermission → Active → Ended                                                                                                                                                                          
-  - Live countdown timer with color changes at 30s and 10s
-  - Real-time scoreboard UI that updates as players score                                                                                                                                                                                    
-  - Player teleportation to arena on round start and back to lobby on end
-  - Score orbs with smooth bobbing animation                                                                                                                                                                                                 
-  - Winner detection with leaderboard tracking                                                                                                                                                                                             
-  - Error-safe game loop with auto-recovery                                                                                                                                                                                                  
-                                                                                                                                                                                                                                           
-  ---                                                                                                                                                                                                                                        
-   
-  ## How It Works                                                                                                                                                                                                                            
-  1. Server waits for minimum players                                                                                                                                                                                                      
-  2. 15 second intermission countdown
-  3. All players teleport to the arena                                                                                                                                                                                                       
-  4. First to 10 points wins — or whoever has the most when time runs out
-  5. Winner announced, everyone returns to lobby                                                                                                                                                                                             
-  6. Loop restarts automatically                                                                                                                                                                                                           
-                                                                                                                                                                                                                                             
-  ---                                                                                                                                                                                                                                      
+# Discord Welcome Bot
 
-  ## Files                                                                                                                                                                                                                                   
-  - `QXE_RoundSystem.lua` — Server script, place in ServerScriptService
-  - `QXE_RoundClient.lua` — LocalScript, place in StarterPlayerScripts                                                                                                                                                                       
-                                                                                                                                                                                                                                             
-  ---
-                                                                                                                                                                                                                                             
-  Built by QXEProgram
+A Discord bot that sends a welcome embed message when a new member joins the server.
+
+## Setup
+
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. Copy `.env.example` to `.env` and fill in your values:
+   ```bash
+   cp .env.example .env
+   ```
+   - `DISCORD_TOKEN` — your bot token from the [Discord Developer Portal](https://discord.com/developers/applications)
+   - `WELCOME_CHANNEL_ID` — the ID of the channel where welcome messages will be sent
+
+3. Enable the **Server Members Intent** in the Developer Portal under your bot's settings.
+
+4. Run the bot:
+   ```bash
+   python bot.py
+   ```
+
+## What it does
+
+When a member joins, the bot posts an embed in the configured channel showing:
+- A personalized welcome message with a mention
+- Their member number
+- Their avatar
+- The date they joined
