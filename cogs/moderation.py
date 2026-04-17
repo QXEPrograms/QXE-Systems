@@ -179,7 +179,12 @@ class Moderation(commands.Cog):
 
     @commands.Cog.listener()
     async def on_command_error(self, ctx: commands.Context, error):
-        if isinstance(error, commands.MissingPermissions):
+        if isinstance(error, commands.CheckFailure):
+            await ctx.send(
+                embed=quick_embed("🚫 You don't have permission to use bot commands.", discord.Color.red()),
+                delete_after=5,
+            )
+        elif isinstance(error, commands.MissingPermissions):
             await ctx.send(
                 embed=quick_embed("🚫 You don't have permission to use that command.", discord.Color.red()),
                 delete_after=5,

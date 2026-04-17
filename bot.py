@@ -15,6 +15,20 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 COGS = ["cogs.welcome", "cogs.rules", "cogs.moderation"]
 
+MOD_ROLE_ID = int(os.getenv("MOD_ROLE_ID", 0))
+
+
+@bot.check
+async def global_mod_check(ctx: commands.Context) -> bool:
+    """Block all commands from users who aren't mods or admins."""
+    if ctx.author.guild_permissions.administrator:
+        return True
+    if MOD_ROLE_ID and any(r.id == MOD_ROLE_ID for r in ctx.author.roles):
+        return True
+    if ctx.author.guild_permissions.manage_messages:
+        return True
+    raise commands.CheckFailure()
+
 
 @bot.event
 async def on_ready():
