@@ -18,21 +18,28 @@ class AcceptRulesView(discord.ui.View):
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         role = interaction.guild.get_role(self.verified_role_id)
         if role is None:
-            await interaction.response.send_message(
-                "Could not find the verified role. Please contact an admin.", ephemeral=True
+            embed = discord.Embed(
+                description="❌ Could not find the verified role. Please contact an admin.",
+                color=discord.Color.red(),
             )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
         if role in interaction.user.roles:
-            await interaction.response.send_message(
-                "You have already accepted the rules!", ephemeral=True
+            embed = discord.Embed(
+                description="✅ You have already accepted the rules!",
+                color=discord.Color.green(),
             )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
         await interaction.user.add_roles(role, reason="Accepted rules")
-        await interaction.response.send_message(
-            f"Thanks for accepting the rules! You now have access to the server.", ephemeral=True
+        embed = discord.Embed(
+            title="Welcome aboard!",
+            description="Thanks for accepting the rules! You now have full access to the server. Enjoy your stay!",
+            color=discord.Color.green(),
         )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class Rules(commands.Cog):
@@ -71,7 +78,11 @@ class Rules(commands.Cog):
     @post_rules.error
     async def post_rules_error(self, ctx: commands.Context, error):
         if isinstance(error, commands.MissingPermissions):
-            await ctx.send("You need Administrator permission to use this command.", delete_after=5)
+            embed = discord.Embed(
+                description="🚫 You need Administrator permission to use this command.",
+                color=discord.Color.red(),
+            )
+            await ctx.send(embed=embed, delete_after=5)
 
 
 async def setup(bot: commands.Bot):
