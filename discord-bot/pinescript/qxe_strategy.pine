@@ -1,0 +1,390 @@
+// ============================================================
+// QXE Trading Strategy
+// LVN (Low Volume Node) + Single Print + 3-Step Model
+// by QXE Systems
+//
+// Timeframe : 1-minute chart
+// Instrument: Futures (NQ, ES, MNQ, MES — or any liquid future)
+//
+// HOW TO USE
+// 1. Add this indicator to a 1-min futures chart.
+// 2. Open "Alerts" → create a new alert on this indicator.
+// 3. Set "Condition" to "QXE Strategy Alert".
+// 4. Paste your webhook server URL into "Webhook URL"
+//    e.g.  https://your-app.up.railway.app/webhook/tradingview
+// 5. Leave "Message" as {{strategy.order.comment}} OR use the
+//    default (the script sends JSON in the alert() call itself).
+//
+// STRATEGY RULES (summary)
+//  Bias   → 30-min TPO: acceptance in upper half = bullish, lower = bearish.
+//           Overnight single prints that hold add extra confidence.
+//  Entry  → LVN / Ledge touch that aligns with bias direction.
+//  Target → Nearby single print.
+//  Best   → 3-Step Model: Single Print context + ISMT/SMT + LVN.
+//  Aggro  → NY Open (9:25–9:45 AM ET): LVN respect at the open.
+// ============================================================
+//@version=5
+indicator("QXE Strategy — LVN + Single Print + 3-Step Model",
+     overlay           = true,
+     max_lines_count   = 500,
+     max_labels_count  = 200,
+     max_boxes_count   = 200)
+
+// ────────────────────────────────────────────────────────────
+// INPUTS
+// ────────────────────────────────────────────────────────────
+grp_session = "Session Settings"
+i_tz            = input.string("America/New_York", "Timezone",     group = grp_session)
+i_sess_open     = input.string("18:00",            "Session Open (6 PM ET)",  group = grp_session)
+i_sess_close    = input.string("18:00",            "Session Close (6 PM ET next day)", group = grp_session)
+
+grp_vp = "Volume Profile"
+i_vp_rows       = input.int(120,   "Rows",                   minval = 40, maxval = 300, group = grp_vp)
+i_lvn_pct       = input.float(0.30, "LVN Threshold (% of POC volume)",
+                              minval = 0.05, maxval = 0.60, step = 0.05, group = grp_vp)
+i_sp_pct        = input.float(0.12, "Single Print Threshold (% of POC volume)",
+                              minval = 0.01, maxval = 0.30, step = 0.01, group = grp_vp)
+
+grp_filter = "Signal Filters"
+i_lvn_prox_ticks = input.float(4.0, "LVN Proximity (ticks)", minval = 0.5, maxval = 20.0, group = grp_filter)
+i_min_quality    = input.int(6,     "Minimum quality to fire alert (1–10)", minval = 1, maxval = 10, group = grp_filter)
+
+grp_display = "Display"
+i_show_lvn   = input.bool(true, "Show LVN lines",          group = grp_display)
+i_show_sp    = input.bool(true, "Show Single Print zones",  group = grp_display)
+i_show_poc   = input.bool(true, "Show POC line",            group = grp_display)
+i_show_bias  = input.bool(true, "Show Bias label",          group = grp_display)
+
+grp_alert = "Alerts"
+i_alert_3step  = input.bool(true, "Alert: 3-Step Model",       group = grp_alert)
+i_alert_aggro  = input.bool(true, "Alert: Aggressive Ledge",   group = grp_alert)
+i_alert_touch  = input.bool(true, "Alert: LVN Touch (monitor)", group = grp_alert)
+i_webhook_url  = input.string("", "Webhook Server URL (for reference)", group = grp_alert)
+
+// ────────────────────────────────────────────────────────────
+// TICK SIZE
+// ────────────────────────────────────────────────────────────
+tick = syminfo.mintick
+lvn_prox = i_lvn_prox_ticks * tick
+
+// ────────────────────────────────────────────────────────────
+// SESSION DETECTION (6 PM → 6 PM NY)
+// ────────────────────────────────────────────────────────────
+// Build a full 23-hour session string: "1800-1800" covers the whole daily session
+daily_sess = i_sess_open + "-" + i_sess_close
+in_session = not na(time("1", daily_sess + ":1234567", i_tz))
+
+// Detect the first bar of a new session
+sess_start = in_session and not in_session[1]
+
+// NY Open window: 9:25–9:45 AM ET
+ny_h  = hour(time, i_tz)
+ny_m  = minute(time, i_tz)
+ny_open_window = ny_h == 9 and ny_m >= 25 and ny_m <= 45
+
+// ────────────────────────────────────────────────────────────
+// SESSION HIGH / LOW (rolling)
+// ────────────────────────────────────────────────────────────
+var float s_high = na
+var float s_low  = na
+
+if sess_start
+    s_high := high
+    s_low  := low
+else if in_session
+    s_high := math.max(nz(s_high, high), high)
+    s_low  := math.min(nz(s_low,  low),  low)
+
+s_range   = nz(s_high, high) - nz(s_low, low)
+row_size  = s_range > 0 ? s_range / i_vp_rows : syminfo.mintick
+
+// ────────────────────────────────────────────────────────────
+// VOLUME PROFILE (session-scoped arrays)
+// ────────────────────────────────────────────────────────────
+var float[] vp_vol  = array.new_float(i_vp_rows, 0.0)
+var float   vp_max  = 0.0
+var int     poc_idx = 0
+var float   poc_px  = na
+
+// Reset arrays on new session
+if sess_start
+    array.clear(vp_vol)
+    for _i = 0 to i_vp_rows - 1
+        array.push(vp_vol, 0.0)
+    vp_max  := 0.0
+    poc_idx := 0
+    poc_px  := na
+
+// Accumulate volume into price buckets
+if in_session and s_range > 0
+    lo_idx  = math.max(0, math.floor((low  - s_low) / row_size))
+    hi_idx  = math.min(i_vp_rows - 1, math.floor((high - s_low) / row_size))
+    n_rows  = hi_idx - lo_idx + 1
+    vol_per = volume / math.max(n_rows, 1)
+
+    for i = lo_idx to hi_idx
+        if i < array.size(vp_vol)
+            array.set(vp_vol, i, array.get(vp_vol, i) + vol_per)
+
+// Recompute POC every bar
+if in_session and array.size(vp_vol) > 0
+    vp_max  := array.max(vp_vol)
+    poc_idx := array.indexof(vp_vol, vp_max)
+    poc_px  := s_low + poc_idx * row_size + row_size / 2
+
+// ────────────────────────────────────────────────────────────
+// LVN DETECTION (isolated low-volume buckets away from POC)
+// ────────────────────────────────────────────────────────────
+// An LVN bucket: volume < LVN_THRESHOLD × POC_volume,
+// with at least one higher-volume neighbour on each side,
+// and not within 2 rows of the POC.
+f_is_lvn(i) =>
+    vp_max > 0 and i > 0 and i < i_vp_rows - 1 and
+    array.size(vp_vol) > i + 1 and
+    array.get(vp_vol, i) < vp_max * i_lvn_pct and
+    array.get(vp_vol, i - 1) > array.get(vp_vol, i) and
+    array.get(vp_vol, i + 1) > array.get(vp_vol, i) and
+    math.abs(i - poc_idx) > 2
+
+// Arrays of valid LVN prices (updated each bar)
+var float[] lvn_prices = array.new_float(0)
+
+if in_session and array.size(vp_vol) == i_vp_rows
+    array.clear(lvn_prices)
+    for i = 1 to i_vp_rows - 2
+        if f_is_lvn(i)
+            array.push(lvn_prices, s_low + i * row_size + row_size / 2)
+
+// ────────────────────────────────────────────────────────────
+// SINGLE PRINT DETECTION (very low volume zones = thin areas)
+// ────────────────────────────────────────────────────────────
+var float[] sp_mid  = array.new_float(0)
+var float[] sp_top  = array.new_float(0)
+var float[] sp_bot  = array.new_float(0)
+
+if in_session and array.size(vp_vol) == i_vp_rows
+    array.clear(sp_mid)
+    array.clear(sp_top)
+    array.clear(sp_bot)
+
+    var bool  in_sp   = false
+    var float sp_st   = na
+
+    for i = 0 to i_vp_rows - 1
+        vol_i = array.get(vp_vol, i)
+        is_sp_row = vp_max > 0 and vol_i < vp_max * i_sp_pct
+
+        if is_sp_row and not in_sp
+            in_sp  := true
+            sp_st  := s_low + i * row_size
+        else if not is_sp_row and in_sp
+            in_sp   := false
+            sp_end  = s_low + i * row_size
+            array.push(sp_bot, sp_st)
+            array.push(sp_top, sp_end)
+            array.push(sp_mid, (sp_st + sp_end) / 2)
+
+// ────────────────────────────────────────────────────────────
+// 30-MINUTE TPO BIAS
+// ────────────────────────────────────────────────────────────
+// Price acceptance: where does the 30-min bar close relative to its range?
+//   > 50%  → bullish (close in upper half)
+//   < 50%  → bearish (close in lower half)
+[tpo_hi, tpo_lo, tpo_cl] = request.security(
+     syminfo.tickerid, "30",
+     [high, low, close],
+     lookahead = barmerge.lookahead_off)
+
+tpo_range      = tpo_hi - tpo_lo
+tpo_acceptance = tpo_range > 0 ? (tpo_cl - tpo_lo) / tpo_range : 0.5
+bias_bull      = tpo_acceptance >= 0.5
+bias_str       = bias_bull ? "BULLISH" : "BEARISH"
+
+// ────────────────────────────────────────────────────────────
+// ISMT / SMT DETECTION (consecutive-candle divergence)
+// ────────────────────────────────────────────────────────────
+// Bullish ISMT: previous candle made a lower low but price rejected and current
+//               candle closes bullish (higher close, failed new low)
+// Bearish ISMT: previous candle made a higher high but current candle closes
+//               bearish (failed new high)
+ismt_bull = low[1] < low[2] and close > open      // failed new low + bullish close
+ismt_bear = high[1] > high[2] and close < open    // failed new high + bearish close
+ismt_any  = ismt_bull or ismt_bear
+
+// ────────────────────────────────────────────────────────────
+// LVN PROXIMITY — is current close near any LVN?
+// ────────────────────────────────────────────────────────────
+near_lvn  = false
+near_lvn_px = float(na)
+
+if array.size(lvn_prices) > 0
+    for i = 0 to array.size(lvn_prices) - 1
+        lp = array.get(lvn_prices, i)
+        if math.abs(close - lp) <= lvn_prox
+            near_lvn    := true
+            near_lvn_px := lp
+            break
+
+// Was price near LVN on previous bar?
+prev_near_lvn = near_lvn[1]
+
+// ────────────────────────────────────────────────────────────
+// SINGLE PRINT — nearest SP target above/below
+// ────────────────────────────────────────────────────────────
+sp_target_price = float(na)
+
+if array.size(sp_mid) > 0
+    best_dist = float(999999)
+    for i = 0 to array.size(sp_mid) - 1
+        dist = math.abs(close - array.get(sp_mid, i))
+        if dist < best_dist
+            best_dist      := dist
+            sp_target_price := array.get(sp_mid, i)
+
+// ────────────────────────────────────────────────────────────
+// 3-STEP MODEL
+// All three components required:
+//   1. Single Print context (SP target within range)
+//   2. ISMT / SMT confirmation
+//   3. LVN (price at LVN)
+// Bias must align.
+// ────────────────────────────────────────────────────────────
+sp_in_context  = not na(sp_target_price)
+
+three_step_long  = near_lvn and ismt_bull and sp_in_context and bias_bull
+three_step_short = near_lvn and ismt_bear and sp_in_context and not bias_bull
+three_step_any   = three_step_long or three_step_short
+three_step_dir   = three_step_long ? "LONG" : "SHORT"
+
+// ────────────────────────────────────────────────────────────
+// AGGRESSIVE LEDGE TRADE (NY Open window + LVN + bias)
+// ────────────────────────────────────────────────────────────
+aggro_long  = ny_open_window and near_lvn and bias_bull  and close >= nz(near_lvn_px, close)
+aggro_short = ny_open_window and near_lvn and not bias_bull and close <= nz(near_lvn_px, close)
+aggro_any   = aggro_long or aggro_short
+aggro_dir   = aggro_long ? "LONG" : "SHORT"
+
+// ────────────────────────────────────────────────────────────
+// LVN TOUCH (first bar price enters LVN proximity)
+// ────────────────────────────────────────────────────────────
+lvn_touch     = near_lvn and not prev_near_lvn
+touch_dir_str = bias_bull ? "LONG_SETUP" : "SHORT_SETUP"
+
+// ────────────────────────────────────────────────────────────
+// QUALITY SCORE CALCULATION
+// ────────────────────────────────────────────────────────────
+// Mirrors server-side signalProcessor.js scoring
+calc_quality(setup_base) =>
+    q = setup_base
+    if ny_open_window
+        q := math.min(q + 1, 10)
+    if tpo_acceptance > 0.65 or tpo_acceptance < 0.35
+        q := math.min(q + 1, 10)
+    q
+
+q_3step  = calc_quality(10)
+q_aggro  = calc_quality(8)
+q_touch  = calc_quality(6)
+
+// ────────────────────────────────────────────────────────────
+// HELPER: build JSON alert string
+// ────────────────────────────────────────────────────────────
+f_ts() => str.format_time(time, "yyyy-MM-dd HH:mm", i_tz)
+
+f_session_str() =>
+    ny_open_window ? "NY_OPEN" :
+    (ny_h >= 9 and ny_h < 16) ? "NY_SESSION" :
+    "OVERNIGHT"
+
+f_json(sig, setup, price_val, lvn_val, bias_val, ismt_val, sp_val, tpo_val, sess, q) =>
+    sp_part  = not na(sp_val)   ? (',"sp_target":'    + str.tostring(sp_val,   "#.##")) : ""
+    ismt_part = ismt_val != ""  ? (',"ismt":"'        + ismt_val + '"')                 : ""
+    '{"symbol":"'    + syminfo.ticker          + '"' +
+    ',"signal":"'    + sig                     + '"' +
+    ',"setup":"'     + setup                   + '"' +
+    ',"price":'      + str.tostring(price_val, "#.##") +
+    ',"lvn_level":'  + str.tostring(lvn_val,   "#.##") +
+    ',"bias":"'      + bias_val                + '"' +
+    ismt_part        +
+    sp_part          +
+    ',"tpo_acceptance":' + str.tostring(tpo_val, "#.####") +
+    ',"time":"'      + f_ts()                  + '"' +
+    ',"session":"'   + sess                    + '"' +
+    ',"quality":'    + str.tostring(q)         + '}'
+
+// ────────────────────────────────────────────────────────────
+// FIRE ALERTS
+// ────────────────────────────────────────────────────────────
+sess_str = f_session_str()
+ismt_tag = ismt_bull ? "BULLISH" : (ismt_bear ? "BEARISH" : "")
+
+// 3-Step Model
+if i_alert_3step and three_step_any and q_3step >= i_min_quality
+    alert(f_json(three_step_dir, "3_STEP_MODEL",
+                 close, near_lvn_px, bias_str, ismt_tag,
+                 sp_target_price, tpo_acceptance, sess_str, q_3step),
+          alert.freq_once_per_bar_close)
+
+// Aggressive Ledge
+if i_alert_aggro and aggro_any and q_aggro >= i_min_quality
+    alert(f_json(aggro_dir, "AGGRESSIVE_LEDGE",
+                 close, near_lvn_px, bias_str, "",
+                 sp_target_price, tpo_acceptance, sess_str, q_aggro),
+          alert.freq_once_per_bar)
+
+// LVN Touch (monitor — fires once per new touch)
+if i_alert_touch and lvn_touch and q_touch >= i_min_quality
+    alert(f_json(touch_dir_str, "LVN_TOUCH",
+                 close, near_lvn_px, bias_str, "",
+                 sp_target_price, tpo_acceptance, sess_str, q_touch),
+          alert.freq_once_per_bar)
+
+// ────────────────────────────────────────────────────────────
+// VISUAL PLOTS
+// ────────────────────────────────────────────────────────────
+
+// Signal markers
+plotshape(three_step_long,  "3-Step Long",       shape.triangleup,   location.belowbar,
+          color.new(color.lime,   0),  size = size.normal)
+plotshape(three_step_short, "3-Step Short",      shape.triangledown, location.abovebar,
+          color.new(color.red,    0),  size = size.normal)
+plotshape(aggro_long,       "Aggro Ledge Long",  shape.circle,       location.belowbar,
+          color.new(color.aqua,   0),  size = size.small)
+plotshape(aggro_short,      "Aggro Ledge Short", shape.circle,       location.abovebar,
+          color.new(color.orange, 0),  size = size.small)
+plotshape(lvn_touch and bias_bull,  "LVN Touch (Bull)", shape.diamond, location.belowbar,
+          color.new(color.green,  50), size = size.tiny)
+plotshape(lvn_touch and not bias_bull, "LVN Touch (Bear)", shape.diamond, location.abovebar,
+          color.new(color.red,    50), size = size.tiny)
+
+// POC line
+plot(i_show_poc and in_session ? poc_px : na, "POC",
+     color = color.new(color.yellow, 0), linewidth = 1)
+
+// Nearest LVN band
+lvn_band_top = near_lvn_px + lvn_prox
+lvn_band_bot = near_lvn_px - lvn_prox
+plot(i_show_lvn and near_lvn ? lvn_band_top : na, "LVN Upper",
+     color = color.new(color.orange, 60), linewidth = 1, style = plot.style_linebr)
+plot(i_show_lvn and near_lvn ? lvn_band_bot : na, "LVN Lower",
+     color = color.new(color.orange, 60), linewidth = 1, style = plot.style_linebr)
+
+// Nearest single print midline
+plot(i_show_sp and not na(sp_target_price) ? sp_target_price : na, "SP Target",
+     color = color.new(color.fuchsia, 0), linewidth = 1, style = plot.style_circles)
+
+// Bias label (last bar only)
+if i_show_bias and barstate.islast
+    bias_col  = bias_bull ? color.new(color.green, 15) : color.new(color.red, 15)
+    bias_icon = bias_bull ? "▲" : "▼"
+    lbl_txt   = "Bias: " + bias_icon + " " + bias_str +
+                "\nTPO: " + str.tostring(math.round(tpo_acceptance * 100)) + "%" +
+                "\nLVNs: " + str.tostring(array.size(lvn_prices)) +
+                "\nSPs:  " + str.tostring(array.size(sp_mid)) +
+                "\nPOC:  $" + str.tostring(poc_px, "#.##")
+    label.new(bar_index + 2, high,
+              lbl_txt,
+              style     = bias_bull ? label.style_label_down : label.style_label_up,
+              color     = bias_col,
+              textcolor = color.white,
+              size      = size.small)

@@ -3,6 +3,11 @@ const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
 
+const { startWebhookServer } = require('./webhook/server');
+
+// Start the TradingView webhook receiver alongside the Discord bot
+startWebhookServer();
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
