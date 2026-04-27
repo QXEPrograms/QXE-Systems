@@ -17,7 +17,9 @@ var string G_COL = "Colors"
 vp_rows    = input.int(60,    "VP Row Count",               minval=20,     maxval=200,  group=G_VP)
 lvn_pct    = input.float(0.45,"LVN Threshold (x avg)",      minval=0.1,    maxval=0.9,  step=0.05,   group=G_VP)
 poc_gap    = input.int(2,     "POC Exclusion Rows",         minval=1,      maxval=10,   group=G_VP)
+va_pct     = input.float(0.70,"Value Area %",               minval=0.5,    maxval=0.95, step=0.05,   group=G_VP)
 show_poc   = input.bool(true, "Show POC",                   group=G_VP)
+show_va    = input.bool(true, "Show VAH / VAL",             group=G_VP)
 show_lvn   = input.bool(true, "Show Ledge Zones",           group=G_VP)
 lvn_ext    = input.int(200,   "Ledge Extension (bars left)", minval=10,     maxval=500,  group=G_VP)
 show_sp    = input.bool(true, "Show Single Prints",         group=G_SP)
@@ -27,6 +29,9 @@ show_mo    = input.bool(true, "Highlight 9:25-9:45 NY",     group=G_MO)
 show_3step = input.bool(true, "Show 3-Step Signals",        group=G_3S)
 lvn_prox   = input.float(0.002,"LVN Proximity pct price",   minval=0.0005, maxval=0.01, step=0.0005, group=G_3S)
 col_poc    = input.color(color.new(color.red,     0),  "POC",              group=G_COL)
+col_vah    = input.color(color.new(color.green,   0),  "VAH",              group=G_COL)
+col_val    = input.color(color.new(color.red,     0),  "VAL",              group=G_COL)
+col_va     = input.color(color.new(color.blue,   88),  "Value Area Fill",  group=G_COL)
 col_lvn    = input.color(color.new(color.orange,  0),  "Ledge",            group=G_COL)
 col_sp_up  = input.color(color.new(color.teal,   60),  "Single Print Up",  group=G_COL)
 col_sp_dn  = input.color(color.new(color.fuchsia,60),  "Single Print Dn",  group=G_COL)
@@ -37,10 +42,10 @@ col_bear   = input.color(color.new(color.red,     0),  "Bear Signal",      group
 // SESSION VOLUME PROFILE
 // ─────────────────────────────────────────────────────────────────────────────
 
-var float   s_hi  = na
-var float   s_lo  = na
-var float[] vols  = array.new_float(0)
-var float[] pxs   = array.new_float(0)
+var float   s_hi = na
+var float   s_lo = na
+var float[] vols = array.new_float(0)
+var float[] pxs  = array.new_float(0)
 
 new_day = ta.change(time("D")) != 0
 
@@ -67,35 +72,68 @@ if not new_day and not na(s_hi) and not na(s_lo) and vp_ready
         array.set(pxs,  idx, s_lo + (idx + 0.5) * row_h)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POC + LEDGE ZONES
+// POC + VAH / VAL + LEDGE ZONES
 // ─────────────────────────────────────────────────────────────────────────────
 
-var float   poc_px   = na
-var float   row_size = na
-var float[] lvn_px   = array.new_float(0)
+var float   poc_px  = na
+var float   vah_px  = na
+var float   val_px  = na
+var float[] lvn_px  = array.new_float(0)
 
-var line    poc_ln   = na
-var label   poc_lb   = na
-var line[]  lvn_lns  = array.new_line(0)
-var label[] lvn_lbs  = array.new_label(0)
-var box[]   lvn_bxs  = array.new_box(0)
+var line    poc_ln  = na
+var label   poc_lb  = na
+var line    vah_ln  = na
+var label   vah_lb  = na
+var line    val_ln  = na
+var label   val_lb  = na
+var box     va_box  = na
+var line[]  lvn_lns = array.new_line(0)
+var label[] lvn_lbs = array.new_label(0)
+var box[]   lvn_bxs = array.new_box(0)
 
 sess_ok = not na(s_hi) and not na(s_lo) and s_hi > s_lo
 
 if barstate.islast and vp_ready and sess_ok
     rng = s_hi - s_lo
     rh  = rng / vp_rows
-    row_size := rh
 
     for i = 0 to vp_rows - 1
         array.set(pxs, i, s_lo + (i + 0.5) * rh)
 
+    // ── POC ──
     poc_i = 0
     for i = 1 to vp_rows - 1
         if array.get(vols, i) > array.get(vols, poc_i)
             poc_i := i
     poc_px := array.get(pxs, poc_i)
 
+    // ── Value Area (VAH / VAL) ──
+    total_vol  = array.sum(vols)
+    target_vol = total_vol * va_pct
+    va_vol     = array.get(vols, poc_i)
+    va_hi_i    = poc_i
+    va_lo_i    = poc_i
+
+    for attempts = 0 to vp_rows * 2
+        if va_vol >= target_vol
+            break
+        above_idx = va_hi_i + 1
+        below_idx = va_lo_i - 1
+        above_v   = above_idx < vp_rows ? array.get(vols, above_idx) : 0.0
+        below_v   = below_idx >= 0      ? array.get(vols, below_idx) : 0.0
+        if above_v == 0.0 and below_v == 0.0
+            break
+        if above_v >= below_v
+            va_hi_i := above_idx
+            va_vol  := va_vol + above_v
+        else
+            va_lo_i := below_idx
+            va_vol  := va_vol + below_v
+
+    vah_px := array.get(pxs, va_hi_i) + rh / 2.0
+    val_px := array.get(pxs, va_lo_i) - rh / 2.0
+
+    // ── LVNs ──
     avg_v = array.avg(vols)
     array.clear(lvn_px)
     if avg_v > 0.0
@@ -118,9 +156,32 @@ if barstate.islast and vp_ready and sess_ok
         poc_ln := line.new(bar_index - lvn_ext, poc_px, bar_index, poc_px, color=col_poc, width=2, extend=extend.right)
         poc_lb := label.new(bar_index, poc_px, "POC", color=col_poc, textcolor=color.white, style=label.style_label_left, size=size.small)
 
-    // ── Draw Ledge Zones ──
+    // ── Draw VAH / VAL ──
+    if show_va and not na(vah_px) and not na(val_px)
+        if not na(vah_ln)
+            line.delete(vah_ln)
+        if not na(vah_lb)
+            label.delete(vah_lb)
+        if not na(val_ln)
+            line.delete(val_ln)
+        if not na(val_lb)
+            label.delete(val_lb)
+        if not na(va_box)
+            box.delete(va_box)
+
+        vah_ln := line.new(bar_index - lvn_ext, vah_px, bar_index, vah_px, color=col_vah, width=2, style=line.style_dashed, extend=extend.right)
+        vah_lb := label.new(bar_index, vah_px, "VAH", color=col_vah, textcolor=color.white, style=label.style_label_left, size=size.small)
+        val_ln := line.new(bar_index - lvn_ext, val_px, bar_index, val_px, color=col_val, width=2, style=line.style_dashed, extend=extend.right)
+        val_lb := label.new(bar_index, val_px, "VAL", color=col_val, textcolor=color.white, style=label.style_label_left, size=size.small)
+        va_box := box.new(bar_index - lvn_ext, vah_px, bar_index, val_px, bgcolor=col_va, border_color=color.new(color.blue, 95), border_width=1, extend=extend.right)
+
+    // ── Draw Ledge Rectangles ──
     if show_lvn
-        // Delete old drawings
+        n_bxs = array.size(lvn_bxs)
+        if n_bxs > 0
+            for i = 0 to n_bxs - 1
+                box.delete(array.get(lvn_bxs, i))
+        array.clear(lvn_bxs)
         n_lns = array.size(lvn_lns)
         if n_lns > 0
             for i = 0 to n_lns - 1
@@ -131,29 +192,15 @@ if barstate.islast and vp_ready and sess_ok
             for i = 0 to n_lbs - 1
                 label.delete(array.get(lvn_lbs, i))
         array.clear(lvn_lbs)
-        n_bxs = array.size(lvn_bxs)
-        if n_bxs > 0
-            for i = 0 to n_bxs - 1
-                box.delete(array.get(lvn_bxs, i))
-        array.clear(lvn_bxs)
 
-        // Draw new ledge zones
         n_lvn = array.size(lvn_px)
         if n_lvn > 0
             half = rh / 2.0
             for i = 0 to n_lvn - 1
                 lp = array.get(lvn_px, i)
-
-                // Filled zone band (top = lp + half, bottom = lp - half)
-                bx = box.new(bar_index - lvn_ext, lp + half, bar_index, lp - half, bgcolor=color.new(col_lvn, 75), border_color=color.new(col_lvn, 40), border_width=1, extend=extend.right)
+                bx = box.new(bar_index - lvn_ext, lp + half, bar_index, lp - half, bgcolor=color.new(col_lvn, 70), border_color=col_lvn, border_width=2, extend=extend.right)
+                lb = label.new(bar_index, lp + half, "LEDGE", color=color.new(col_lvn, 10), textcolor=color.white, style=label.style_label_left, size=size.small)
                 array.push(lvn_bxs, bx)
-
-                // Solid center line
-                ln = line.new(bar_index - lvn_ext, lp, bar_index, lp, color=col_lvn, width=2, extend=extend.right)
-                array.push(lvn_lns, ln)
-
-                // Label
-                lb = label.new(bar_index, lp + half, "LEDGE", color=color.new(col_lvn, 20), textcolor=color.white, style=label.style_label_left, size=size.small)
                 array.push(lvn_lbs, lb)
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -216,8 +263,8 @@ final_bear   = ismt_bear or ismt_bear_fb
 // 3-STEP MODEL
 // ─────────────────────────────────────────────────────────────────────────────
 
-near_lvn     = false
-n_lvn_check  = array.size(lvn_px)
+near_lvn    = false
+n_lvn_check = array.size(lvn_px)
 if n_lvn_check > 0
     prox = close * lvn_prox
     for i = 0 to n_lvn_check - 1
