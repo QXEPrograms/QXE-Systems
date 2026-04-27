@@ -15,7 +15,7 @@ var string G_3S  = "3-Step Model"
 var string G_COL = "Colors"
 
 vp_rows    = input.int(60,    "VP Row Count",              minval=20,     maxval=200,  group=G_VP)
-lvn_pct    = input.float(0.35,"LVN Threshold (x avg)",     minval=0.1,    maxval=0.9,  step=0.05,    group=G_VP)
+lvn_pct    = input.float(0.35,"LVN Threshold (x avg)",     minval=0.1,    maxval=0.9,  step=0.05,   group=G_VP)
 poc_gap    = input.int(3,     "POC Exclusion Rows",        minval=1,      maxval=10,   group=G_VP)
 show_poc   = input.bool(true, "Show POC",                  group=G_VP)
 show_lvn   = input.bool(true, "Show LVN Lines",            group=G_VP)
@@ -25,7 +25,7 @@ sp_lb      = input.int(150,   "Lookback Bars",             minval=20,     maxval
 show_bias  = input.bool(true, "Show Bias Label",           group=G_TPO)
 show_mo    = input.bool(true, "Highlight 9:25-9:45 NY",    group=G_MO)
 show_3step = input.bool(true, "Show 3-Step Signals",       group=G_3S)
-lvn_prox   = input.float(0.002,"LVN Proximity pct price",  minval=0.0005, maxval=0.01, step=0.0005,  group=G_3S)
+lvn_prox   = input.float(0.002,"LVN Proximity pct price",  minval=0.0005, maxval=0.01, step=0.0005, group=G_3S)
 col_poc    = input.color(color.new(color.red,     0),  "POC",             group=G_COL)
 col_lvn    = input.color(color.new(color.orange, 30),  "LVN",             group=G_COL)
 col_sp_up  = input.color(color.new(color.teal,   60),  "Single Print Up", group=G_COL)
@@ -56,16 +56,19 @@ else
     s_hi := math.max(nz(s_hi, high), high)
     s_lo := math.min(nz(s_lo, low),  low)
 
-if not new_day and not na(s_hi) and not na(s_lo)
+// Accumulate volume — guard both arrays and a valid price range
+vp_ready = array.size(vols) == vp_rows and array.size(pxs) == vp_rows
+
+if not new_day and not na(s_hi) and not na(s_lo) and vp_ready
     rng = s_hi - s_lo
-    if rng > 0.0 and array.size(vols) == vp_rows
+    if rng > 0.0
         row_h = rng / vp_rows
-        idx = math.min(math.max(int(math.floor(((high + low) / 2.0 - s_lo) / row_h)), 0), vp_rows - 1)
+        idx   = math.min(math.max(int(math.floor(((high + low) / 2.0 - s_lo) / row_h)), 0), vp_rows - 1)
         array.set(vols, idx, array.get(vols, idx) + volume)
         array.set(pxs,  idx, s_lo + (idx + 0.5) * row_h)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POC + LVN  (computed and drawn on the last bar only)
+// POC + LVN  (last bar, both arrays validated, session range must be non-zero)
 // ─────────────────────────────────────────────────────────────────────────────
 
 var float   poc_px  = na
@@ -75,32 +78,39 @@ var label   poc_lb  = na
 var line[]  lvn_lns = array.new_line(0)
 var label[] lvn_lbs = array.new_label(0)
 
-if barstate.islast and array.size(vols) == vp_rows
+sess_ok = not na(s_hi) and not na(s_lo) and s_hi > s_lo
+
+if barstate.islast and vp_ready and sess_ok
     rng = s_hi - s_lo
     rh  = rng / vp_rows
 
+    // Rebuild pxs mid-prices for current session range
     for i = 0 to vp_rows - 1
         array.set(pxs, i, s_lo + (i + 0.5) * rh)
 
+    // Find POC (highest-volume row)
     poc_i = 0
     for i = 1 to vp_rows - 1
         if array.get(vols, i) > array.get(vols, poc_i)
             poc_i := i
     poc_px := array.get(pxs, poc_i)
 
+    // Find LVNs — only when there is actual volume to compare
     avg_v = array.avg(vols)
     array.clear(lvn_px)
-    for i = 1 to vp_rows - 2
-        v  = array.get(vols, i)
-        vp = array.get(vols, i - 1)
-        vn = array.get(vols, i + 1)
-        is_min  = v < vp and v < vn
-        is_low  = v < avg_v * lvn_pct
-        is_far  = math.abs(i - poc_i) > poc_gap
-        if is_min and is_low and is_far
-            array.push(lvn_px, array.get(pxs, i))
+    if avg_v > 0.0
+        for i = 1 to vp_rows - 2
+            v      = array.get(vols, i)
+            vp_vol = array.get(vols, i - 1)
+            vn_vol = array.get(vols, i + 1)
+            is_min = v < vp_vol and v < vn_vol
+            is_low = v < avg_v * lvn_pct
+            is_far = math.abs(i - poc_i) > poc_gap
+            if is_min and is_low and is_far
+                array.push(lvn_px, array.get(pxs, i))
 
-    if show_poc
+    // Draw POC
+    if show_poc and not na(poc_px)
         if not na(poc_ln)
             line.delete(poc_ln)
         if not na(poc_lb)
@@ -108,17 +118,24 @@ if barstate.islast and array.size(vols) == vp_rows
         poc_ln := line.new(bar_index - lvn_ext, poc_px, bar_index, poc_px, color=col_poc, width=2, extend=extend.right)
         poc_lb := label.new(bar_index, poc_px, "POC", color=col_poc, textcolor=color.white, style=label.style_label_left, size=size.small)
 
+    // Draw LVN lines
     if show_lvn
-        for i = 0 to array.size(lvn_lns) - 1
-            line.delete(array.get(lvn_lns, i))
+        n_lns = array.size(lvn_lns)
+        if n_lns > 0
+            for i = 0 to n_lns - 1
+                line.delete(array.get(lvn_lns, i))
         array.clear(lvn_lns)
-        for i = 0 to array.size(lvn_lbs) - 1
-            label.delete(array.get(lvn_lbs, i))
+        n_lbs = array.size(lvn_lbs)
+        if n_lbs > 0
+            for i = 0 to n_lbs - 1
+                label.delete(array.get(lvn_lbs, i))
         array.clear(lvn_lbs)
-        for i = 0 to array.size(lvn_px) - 1
-            lp = array.get(lvn_px, i)
-            array.push(lvn_lns, line.new(bar_index - lvn_ext, lp, bar_index, lp, color=col_lvn, width=1, style=line.style_dashed, extend=extend.right))
-            array.push(lvn_lbs, label.new(bar_index, lp, "LVN", color=col_lvn, textcolor=color.white, style=label.style_label_left, size=size.tiny))
+        n_lvn = array.size(lvn_px)
+        if n_lvn > 0
+            for i = 0 to n_lvn - 1
+                lp = array.get(lvn_px, i)
+                array.push(lvn_lns, line.new(bar_index - lvn_ext, lp, bar_index, lp, color=col_lvn, width=1, style=line.style_dashed, extend=extend.right))
+                array.push(lvn_lbs, label.new(bar_index, lp, "LVN", color=col_lvn, textcolor=color.white, style=label.style_label_left, size=size.tiny))
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SINGLE PRINTS  (gap areas = price visited only once)
@@ -181,9 +198,10 @@ final_bear   = ismt_bear or ismt_bear_fb
 // ─────────────────────────────────────────────────────────────────────────────
 
 near_lvn = false
-if array.size(lvn_px) > 0
+n_lvn_check = array.size(lvn_px)
+if n_lvn_check > 0
     prox = close * lvn_prox
-    for i = 0 to array.size(lvn_px) - 1
+    for i = 0 to n_lvn_check - 1
         if math.abs(close - array.get(lvn_px, i)) <= prox
             near_lvn := true
 
@@ -207,6 +225,6 @@ bgcolor(show_mo and in_open ? color.new(color.yellow, 88) : na, title="Aggressiv
 // ALERTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-alertcondition(sig_bull, "3-Step Bull Setup",     "QXE: Bullish 3-Step - LVN + ISMT + Bias aligned")
-alertcondition(sig_bear, "3-Step Bear Setup",     "QXE: Bearish 3-Step - LVN + ISMT + Bias aligned")
+alertcondition(sig_bull, "3-Step Bull Setup",       "QXE: Bullish 3-Step - LVN + ISMT + Bias aligned")
+alertcondition(sig_bear, "3-Step Bear Setup",       "QXE: Bearish 3-Step - LVN + ISMT + Bias aligned")
 alertcondition(in_open,  "Aggressive Ledge Window", "QXE: 9:30 window open - watch ledge reactions")
