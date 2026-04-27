@@ -14,24 +14,24 @@ var string G_MO  = "Market Open"
 var string G_3S  = "3-Step Model"
 var string G_COL = "Colors"
 
-vp_rows    = input.int(60,    "VP Row Count",              minval=20,     maxval=200,  group=G_VP)
-lvn_pct    = input.float(0.35,"LVN Threshold (x avg)",     minval=0.1,    maxval=0.9,  step=0.05,   group=G_VP)
-poc_gap    = input.int(3,     "POC Exclusion Rows",        minval=1,      maxval=10,   group=G_VP)
-show_poc   = input.bool(true, "Show POC",                  group=G_VP)
-show_lvn   = input.bool(true, "Show LVN Lines",            group=G_VP)
-lvn_ext    = input.int(200,   "LVN Line Extension (bars)", minval=10,     maxval=500,  group=G_VP)
-show_sp    = input.bool(true, "Show Single Prints",        group=G_SP)
-sp_lb      = input.int(150,   "Lookback Bars",             minval=20,     maxval=400,  group=G_SP)
-show_bias  = input.bool(true, "Show Bias Label",           group=G_TPO)
-show_mo    = input.bool(true, "Highlight 9:25-9:45 NY",    group=G_MO)
-show_3step = input.bool(true, "Show 3-Step Signals",       group=G_3S)
-lvn_prox   = input.float(0.002,"LVN Proximity pct price",  minval=0.0005, maxval=0.01, step=0.0005, group=G_3S)
-col_poc    = input.color(color.new(color.red,     0),  "POC",             group=G_COL)
-col_lvn    = input.color(color.new(color.orange, 30),  "LVN",             group=G_COL)
-col_sp_up  = input.color(color.new(color.teal,   60),  "Single Print Up", group=G_COL)
-col_sp_dn  = input.color(color.new(color.fuchsia,60),  "Single Print Dn", group=G_COL)
-col_bull   = input.color(color.new(color.green,   0),  "Bull Signal",     group=G_COL)
-col_bear   = input.color(color.new(color.red,     0),  "Bear Signal",     group=G_COL)
+vp_rows    = input.int(60,    "VP Row Count",               minval=20,     maxval=200,  group=G_VP)
+lvn_pct    = input.float(0.45,"LVN Threshold (x avg)",      minval=0.1,    maxval=0.9,  step=0.05,   group=G_VP)
+poc_gap    = input.int(2,     "POC Exclusion Rows",         minval=1,      maxval=10,   group=G_VP)
+show_poc   = input.bool(true, "Show POC",                   group=G_VP)
+show_lvn   = input.bool(true, "Show Ledge Zones",           group=G_VP)
+lvn_ext    = input.int(200,   "Ledge Extension (bars left)", minval=10,     maxval=500,  group=G_VP)
+show_sp    = input.bool(true, "Show Single Prints",         group=G_SP)
+sp_lb      = input.int(150,   "Lookback Bars",              minval=20,     maxval=400,  group=G_SP)
+show_bias  = input.bool(true, "Show Bias Label",            group=G_TPO)
+show_mo    = input.bool(true, "Highlight 9:25-9:45 NY",     group=G_MO)
+show_3step = input.bool(true, "Show 3-Step Signals",        group=G_3S)
+lvn_prox   = input.float(0.002,"LVN Proximity pct price",   minval=0.0005, maxval=0.01, step=0.0005, group=G_3S)
+col_poc    = input.color(color.new(color.red,     0),  "POC",              group=G_COL)
+col_lvn    = input.color(color.new(color.orange,  0),  "Ledge",            group=G_COL)
+col_sp_up  = input.color(color.new(color.teal,   60),  "Single Print Up",  group=G_COL)
+col_sp_dn  = input.color(color.new(color.fuchsia,60),  "Single Print Dn",  group=G_COL)
+col_bull   = input.color(color.new(color.green,   0),  "Bull Signal",      group=G_COL)
+col_bear   = input.color(color.new(color.red,     0),  "Bear Signal",      group=G_COL)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SESSION VOLUME PROFILE
@@ -56,7 +56,6 @@ else
     s_hi := math.max(nz(s_hi, high), high)
     s_lo := math.min(nz(s_lo, low),  low)
 
-// Accumulate volume — guard both arrays and a valid price range
 vp_ready = array.size(vols) == vp_rows and array.size(pxs) == vp_rows
 
 if not new_day and not na(s_hi) and not na(s_lo) and vp_ready
@@ -68,34 +67,35 @@ if not new_day and not na(s_hi) and not na(s_lo) and vp_ready
         array.set(pxs,  idx, s_lo + (idx + 0.5) * row_h)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POC + LVN  (last bar, both arrays validated, session range must be non-zero)
+// POC + LEDGE ZONES
 // ─────────────────────────────────────────────────────────────────────────────
 
-var float   poc_px  = na
-var float[] lvn_px  = array.new_float(0)
-var line    poc_ln  = na
-var label   poc_lb  = na
-var line[]  lvn_lns = array.new_line(0)
-var label[] lvn_lbs = array.new_label(0)
+var float   poc_px   = na
+var float   row_size = na
+var float[] lvn_px   = array.new_float(0)
+
+var line    poc_ln   = na
+var label   poc_lb   = na
+var line[]  lvn_lns  = array.new_line(0)
+var label[] lvn_lbs  = array.new_label(0)
+var box[]   lvn_bxs  = array.new_box(0)
 
 sess_ok = not na(s_hi) and not na(s_lo) and s_hi > s_lo
 
 if barstate.islast and vp_ready and sess_ok
     rng = s_hi - s_lo
     rh  = rng / vp_rows
+    row_size := rh
 
-    // Rebuild pxs mid-prices for current session range
     for i = 0 to vp_rows - 1
         array.set(pxs, i, s_lo + (i + 0.5) * rh)
 
-    // Find POC (highest-volume row)
     poc_i = 0
     for i = 1 to vp_rows - 1
         if array.get(vols, i) > array.get(vols, poc_i)
             poc_i := i
     poc_px := array.get(pxs, poc_i)
 
-    // Find LVNs — only when there is actual volume to compare
     avg_v = array.avg(vols)
     array.clear(lvn_px)
     if avg_v > 0.0
@@ -109,7 +109,7 @@ if barstate.islast and vp_ready and sess_ok
             if is_min and is_low and is_far
                 array.push(lvn_px, array.get(pxs, i))
 
-    // Draw POC
+    // ── Draw POC ──
     if show_poc and not na(poc_px)
         if not na(poc_ln)
             line.delete(poc_ln)
@@ -118,8 +118,9 @@ if barstate.islast and vp_ready and sess_ok
         poc_ln := line.new(bar_index - lvn_ext, poc_px, bar_index, poc_px, color=col_poc, width=2, extend=extend.right)
         poc_lb := label.new(bar_index, poc_px, "POC", color=col_poc, textcolor=color.white, style=label.style_label_left, size=size.small)
 
-    // Draw LVN lines
+    // ── Draw Ledge Zones ──
     if show_lvn
+        // Delete old drawings
         n_lns = array.size(lvn_lns)
         if n_lns > 0
             for i = 0 to n_lns - 1
@@ -130,15 +131,33 @@ if barstate.islast and vp_ready and sess_ok
             for i = 0 to n_lbs - 1
                 label.delete(array.get(lvn_lbs, i))
         array.clear(lvn_lbs)
+        n_bxs = array.size(lvn_bxs)
+        if n_bxs > 0
+            for i = 0 to n_bxs - 1
+                box.delete(array.get(lvn_bxs, i))
+        array.clear(lvn_bxs)
+
+        // Draw new ledge zones
         n_lvn = array.size(lvn_px)
         if n_lvn > 0
+            half = rh / 2.0
             for i = 0 to n_lvn - 1
                 lp = array.get(lvn_px, i)
-                array.push(lvn_lns, line.new(bar_index - lvn_ext, lp, bar_index, lp, color=col_lvn, width=1, style=line.style_dashed, extend=extend.right))
-                array.push(lvn_lbs, label.new(bar_index, lp, "LVN", color=col_lvn, textcolor=color.white, style=label.style_label_left, size=size.tiny))
+
+                // Filled zone band (top = lp + half, bottom = lp - half)
+                bx = box.new(bar_index - lvn_ext, lp + half, bar_index, lp - half, bgcolor=color.new(col_lvn, 75), border_color=color.new(col_lvn, 40), border_width=1, extend=extend.right)
+                array.push(lvn_bxs, bx)
+
+                // Solid center line
+                ln = line.new(bar_index - lvn_ext, lp, bar_index, lp, color=col_lvn, width=2, extend=extend.right)
+                array.push(lvn_lns, ln)
+
+                // Label
+                lb = label.new(bar_index, lp + half, "LEDGE", color=color.new(col_lvn, 20), textcolor=color.white, style=label.style_label_left, size=size.small)
+                array.push(lvn_lbs, lb)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SINGLE PRINTS  (gap areas = price visited only once)
+// SINGLE PRINTS
 // ─────────────────────────────────────────────────────────────────────────────
 
 if show_sp and barstate.islast
@@ -183,7 +202,7 @@ if show_bias and barstate.islast
     bias_lbl := label.new(bar_index, ta.highest(high, 10), btxt, color=bcol, textcolor=color.white, style=label.style_label_down, size=size.normal)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ISMT DETECTION  (2-candle sweep-and-reverse)
+// ISMT DETECTION
 // ─────────────────────────────────────────────────────────────────────────────
 
 ismt_bull    = low[1] < low[2] and close[1] <= open[1] and close > high[1]
@@ -194,11 +213,11 @@ final_bull   = ismt_bull or ismt_bull_fb
 final_bear   = ismt_bear or ismt_bear_fb
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3-STEP MODEL  (Bias + ISMT + LVN proximity)
+// 3-STEP MODEL
 // ─────────────────────────────────────────────────────────────────────────────
 
-near_lvn = false
-n_lvn_check = array.size(lvn_px)
+near_lvn     = false
+n_lvn_check  = array.size(lvn_px)
 if n_lvn_check > 0
     prox = close * lvn_prox
     for i = 0 to n_lvn_check - 1
@@ -212,7 +231,7 @@ plotshape(sig_bull, "3-Step Bull", shape.triangleup,   location.belowbar, col_bu
 plotshape(sig_bear, "3-Step Bear", shape.triangledown, location.abovebar, col_bear, size=size.normal)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MARKET OPEN WINDOW  (9:25-9:45 AM New York)
+// MARKET OPEN WINDOW
 // ─────────────────────────────────────────────────────────────────────────────
 
 ny_h    = hour(time,   "America/New_York")
