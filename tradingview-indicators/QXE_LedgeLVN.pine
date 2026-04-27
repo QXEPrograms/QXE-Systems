@@ -1,0 +1,258 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+// © QXE Systems
+//@version=5
+indicator("QXE Ledge / LVN Strategy", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+var g_vp   = "Volume Profile"
+vp_rows        = input.int(60,    "VP Row Count",         minval=20, maxval=200, group=g_vp)
+lvn_pct        = input.float(0.35,"LVN Threshold (× avg)",minval=0.1,maxval=0.9,step=0.05,group=g_vp)
+poc_gap        = input.int(3,     "POC Exclusion Rows",   minval=1,  maxval=10,  group=g_vp)
+show_poc       = input.bool(true, "Show POC",             group=g_vp)
+show_lvn       = input.bool(true, "Show LVN Lines",       group=g_vp)
+lvn_extend_bar = input.int(200,   "LVN Line Extension (bars)", minval=10, maxval=500, group=g_vp)
+
+var g_sp  = "Single Prints"
+show_sp        = input.bool(true, "Show Single Prints",   group=g_sp)
+sp_lookback    = input.int(150,   "Lookback Bars",        minval=20, maxval=400, group=g_sp)
+
+var g_tpo = "30-Min TPO Bias"
+show_bias      = input.bool(true, "Show Bias Label",      group=g_tpo)
+
+var g_mo  = "Market Open Window"
+show_mo_bg     = input.bool(true, "Highlight 9:25–9:45 NY",group=g_mo)
+
+var g_3s  = "3-Step Model"
+show_3step     = input.bool(true, "Show 3-Step Signals",  group=g_3s)
+lvn_proximity  = input.float(0.002,"LVN Proximity (% price)",minval=0.0005,maxval=0.01,step=0.0005,group=g_3s)
+
+var g_col = "Colors"
+col_poc        = input.color(color.new(color.red,    0),  "POC",            group=g_col)
+col_lvn        = input.color(color.new(color.orange, 30), "LVN",            group=g_col)
+col_sp_bull    = input.color(color.new(color.teal,   60), "Single Print Up",group=g_col)
+col_sp_bear    = input.color(color.new(color.fuchsia,60), "Single Print Dn",group=g_col)
+col_bull       = input.color(color.new(color.green,  0),  "Bull Signal",    group=g_col)
+col_bear       = input.color(color.new(color.red,    0),  "Bear Signal",    group=g_col)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SESSION VOLUME PROFILE
+// ─────────────────────────────────────────────────────────────────────────────
+
+var float s_hi   = na
+var float s_lo   = na
+var float[] vols = array.new_float(0)   // volume per row
+var float[] pxs  = array.new_float(0)   // mid-price per row
+
+bool new_day = ta.change(time("D")) != 0
+
+if new_day
+    s_hi := high
+    s_lo := low
+    array.clear(vols)
+    array.clear(pxs)
+    for i = 0 to vp_rows - 1
+        array.push(vols, 0.0)
+        array.push(pxs,  0.0)
+else
+    s_hi := math.max(nz(s_hi, high), high)
+    s_lo := math.min(nz(s_lo, low),  low)
+
+// Accumulate volume each bar
+if not new_day and not na(s_hi) and not na(s_lo)
+    float rng = s_hi - s_lo
+    if rng > 0 and array.size(vols) == vp_rows
+        float row_h = rng / vp_rows
+        int   idx   = math.min(math.max(int(math.floor(((high + low) / 2 - s_lo) / row_h)), 0), vp_rows - 1)
+        array.set(vols, idx, array.get(vols, idx) + volume)
+        // Update mid-price for this row (only needed once but harmless to repeat)
+        array.set(pxs, idx, s_lo + (idx + 0.5) * row_h)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DERIVE POC + LVN ON LAST BAR
+// ─────────────────────────────────────────────────────────────────────────────
+
+var float   poc_px   = na
+var float[] lvn_px   = array.new_float(0)
+
+// Persistent drawing handles
+var line         poc_ln  = na
+var label        poc_lb  = na
+var line[]       lvn_lns = array.new_line(0)
+var label[]      lvn_lbs = array.new_label(0)
+
+if barstate.islast and array.size(vols) == vp_rows
+    // Rebuild row mid-prices in case session range shifted
+    float rng = s_hi - s_lo
+    float rh  = rng / vp_rows
+    for i = 0 to vp_rows - 1
+        array.set(pxs, i, s_lo + (i + 0.5) * rh)
+
+    // POC = highest volume row
+    float max_v = array.max(vols)
+    int   poc_i = array.indexof(vols, max_v)
+    poc_px := array.get(pxs, poc_i)
+
+    // LVN = local volume minimum, below threshold, not near POC
+    float avg_v = array.avg(vols)
+    array.clear(lvn_px)
+    for i = 1 to vp_rows - 2
+        float v  = array.get(vols, i)
+        float vp = array.get(vols, i - 1)
+        float vn = array.get(vols, i + 1)
+        bool  local_min  = v < vp and v < vn
+        bool  low_volume = v < avg_v * lvn_pct
+        bool  away_poc   = math.abs(i - poc_i) > poc_gap
+        if local_min and low_volume and away_poc
+            array.push(lvn_px, array.get(pxs, i))
+
+    // ── Draw POC ──
+    if show_poc
+        if not na(poc_ln)
+            line.delete(poc_ln)
+        if not na(poc_lb)
+            label.delete(poc_lb)
+        poc_ln := line.new(bar_index - lvn_extend_bar, poc_px, bar_index, poc_px,
+                           color=col_poc, width=2, extend=extend.right)
+        poc_lb := label.new(bar_index, poc_px, "POC",
+                            color=col_poc, textcolor=color.white,
+                            style=label.style_label_left, size=size.small)
+
+    // ── Draw LVN lines ──
+    if show_lvn
+        for old in lvn_lns
+            line.delete(old)
+        array.clear(lvn_lns)
+        for old in lvn_lbs
+            label.delete(old)
+        array.clear(lvn_lbs)
+
+        for i = 0 to array.size(lvn_px) - 1
+            float lp = array.get(lvn_px, i)
+            line ln = line.new(bar_index - lvn_extend_bar, lp, bar_index, lp,
+                               color=col_lvn, width=1,
+                               style=line.style_dashed, extend=extend.right)
+            array.push(lvn_lns, ln)
+            label lb = label.new(bar_index, lp, "LVN",
+                                 color=col_lvn, textcolor=color.white,
+                                 style=label.style_label_left, size=size.tiny)
+            array.push(lvn_lbs, lb)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SINGLE PRINTS  (gaps between consecutive bars = price visited once)
+// ─────────────────────────────────────────────────────────────────────────────
+
+if show_sp and barstate.islast
+    for i = 1 to math.min(sp_lookback, bar_index - 1)
+        float cur_lo  = low[i]
+        float cur_hi  = high[i]
+        float prev_lo = low[i + 1]
+        float prev_hi = high[i + 1]
+
+        // Upside gap: previous close left a gap above
+        if cur_lo > prev_hi
+            box.new(bar_index - i - 1, prev_hi, bar_index - i, cur_lo,
+                    bgcolor=col_sp_bull, border_color=color.new(color.teal, 20),
+                    border_width=1)
+
+        // Downside gap: previous close left a gap below
+        if cur_hi < prev_lo
+            box.new(bar_index - i - 1, cur_hi, bar_index - i, prev_lo,
+                    bgcolor=col_sp_bear, border_color=color.new(color.fuchsia, 20),
+                    border_width=1)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 30-MIN TPO BIAS
+// (count 1-min bars in upper vs lower half of day's range → bias direction)
+// ─────────────────────────────────────────────────────────────────────────────
+
+var float day_hi     = na
+var float day_lo     = na
+var float upper_tpo  = 0.0
+var float lower_tpo  = 0.0
+
+if new_day
+    day_hi    := high
+    day_lo    := low
+    upper_tpo := 0.0
+    lower_tpo := 0.0
+else
+    day_hi := math.max(nz(day_hi, high), high)
+    day_lo := math.min(nz(day_lo, low),  low)
+    float mid = (day_hi + day_lo) / 2.0
+    if (high + low) / 2.0 >= mid
+        upper_tpo += 1
+    else
+        lower_tpo += 1
+
+bool bull_bias = upper_tpo > lower_tpo
+bool bear_bias = lower_tpo > upper_tpo
+
+var label bias_lbl = na
+if show_bias and barstate.islast
+    if not na(bias_lbl)
+        label.delete(bias_lbl)
+    string btxt  = bull_bias ? "▲ BULLISH BIAS" : bear_bias ? "▼ BEARISH BIAS" : "– NEUTRAL"
+    color  bcol  = bull_bias ? color.green : bear_bias ? color.red : color.gray
+    bias_lbl := label.new(bar_index, ta.highest(high, 10),
+                          btxt, color=bcol, textcolor=color.white,
+                          style=label.style_label_down, size=size.normal)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ISMT DETECTION  (2-candle sweep-and-reverse)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Bullish ISMT: bar[1] sweeps prior low → bar[0] reclaims above bar[1] high
+bool ismt_bull = low[1] < low[2] and close[1] > open[1] == false  // bar1 bearish sweep
+                 and close > high[1]                               // bar0 reclaims
+
+// Bearish ISMT: bar[1] sweeps prior high → bar[0] reclaims below bar[1] low
+bool ismt_bear = high[1] > high[2] and close[1] < open[1] == false
+                 and close < low[1]
+
+// Simpler fallback — two-candle reversal at extremes
+bool ismt_bull_simple = low[1] < low[2] and close > high[1]
+bool ismt_bear_simple = high[1] > high[2] and close < low[1]
+
+bool final_ismt_bull = ismt_bull or ismt_bull_simple
+bool final_ismt_bear = ismt_bear or ismt_bear_simple
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3-STEP MODEL SIGNAL  (Single Print + ISMT + LVN)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Check proximity to any LVN
+bool near_lvn = false
+if array.size(lvn_px) > 0
+    float prox = close * lvn_proximity
+    for i = 0 to array.size(lvn_px) - 1
+        if math.abs(close - array.get(lvn_px, i)) <= prox
+            near_lvn := true
+
+// 3-Step signal = bias + ISMT + at/near LVN
+bool sig_bull = show_3step and bull_bias and final_ismt_bull and near_lvn
+bool sig_bear = show_3step and bear_bias and final_ismt_bear and near_lvn
+
+plotshape(sig_bull, "3-Step Bull", shape.triangleup,   location.belowbar, col_bull, size=size.normal)
+plotshape(sig_bear, "3-Step Bear", shape.triangledown, location.abovebar, col_bear, size=size.normal)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MARKET OPEN WINDOW  (9:25 – 9:45 AM New York = aggressive ledge window)
+// ─────────────────────────────────────────────────────────────────────────────
+
+int   ny_hour = hour(time,   "America/New_York")
+int   ny_min  = minute(time, "America/New_York")
+bool  in_open = ny_hour == 9 and ny_min >= 25 and ny_min <= 45
+
+bgcolor(show_mo_bg and in_open ? color.new(color.yellow, 88) : na,
+        title="Aggressive Ledge Window")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ALERTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+alertcondition(sig_bull, "3-Step Bull Setup", "QXE: Bullish 3-Step — LVN + ISMT + Bias aligned")
+alertcondition(sig_bear, "3-Step Bear Setup", "QXE: Bearish 3-Step — LVN + ISMT + Bias aligned")
+alertcondition(in_open,  "Aggressive Ledge Window Open", "QXE: 9:30 window — watch ledge reactions")
